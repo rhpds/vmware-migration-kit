@@ -43,6 +43,7 @@ type NbdkitConfig struct {
 	UUID        string
 	UseSocks    bool
 	VddkConfig  *vmware.VddkConfig
+	Datacenter  string // datacenter name for /folder/ URL construction
 }
 
 type NbdkitServer struct {
@@ -94,11 +95,94 @@ func (c *NbdkitConfig) RunNbdKitFromLocal(diskName, diskPath string) (*NbdkitSer
 }
 
 func (c *NbdkitConfig) RunNbdKit(diskName string) (*NbdkitServer, error) {
-	if c.UseSocks {
-		return c.RunNbdKitSocks(diskName)
-	} else {
-		return c.RunNbdKitURI(diskName)
+	// Default to curl plugin (no VDDK dependency).
+	// Constructs an HTTPS URL to the vCenter /folder/ endpoint and uses
+	// nbdkit-curl to download the flat VMDK over HTTP.
+	return c.RunNbdKitCurl(diskName)
+}
+
+// diskBackingToFolderURL converts a vSphere disk backing path like
+// "[workload_share] database/database.vmdk" into a /folder/ URL like
+// "https://server/folder/database/database-flat.vmdk?dcPath=RS00&dsName=workload_share"
+func (c *NbdkitConfig) diskBackingToFolderURL(diskName string) (string, error) {
+	// Parse "[dsName] path/to/disk.vmdk"
+	diskName = strings.TrimSpace(diskName)
+	if !strings.HasPrefix(diskName, "[") {
+		return "", fmt.Errorf("unexpected disk backing format: %s", diskName)
 	}
+	closeBracket := strings.Index(diskName, "]")
+	if closeBracket < 0 {
+		return "", fmt.Errorf("unexpected disk backing format: %s", diskName)
+	}
+	dsName := diskName[1:closeBracket]
+	diskPath := strings.TrimSpace(diskName[closeBracket+1:])
+
+	// Convert .vmdk to -flat.vmdk for the raw backing file
+	if strings.HasSuffix(diskPath, ".vmdk") {
+		diskPath = strings.TrimSuffix(diskPath, ".vmdk") + "-flat.vmdk"
+	}
+
+	dcPath := c.Datacenter
+	if dcPath == "" {
+		dcPath = "ha-datacenter"
+	}
+
+	return fmt.Sprintf("https://%s/folder/%s?dcPath=%s&dsName=%s",
+		c.Server, diskPath, dcPath, dsName), nil
+}
+
+// RunNbdKitCurl starts nbdkit with the curl plugin to download a disk over HTTPS.
+// This avoids requiring the proprietary VDDK library.
+func (c *NbdkitConfig) RunNbdKitCurl(diskName string) (*NbdkitServer, error) {
+	diskURL, err := c.diskBackingToFolderURL(diskName)
+	if err != nil {
+		return nil, err
+	}
+
+	safeVmName := moduleutils.SafeVmName(c.VmName)
+	socket := fmt.Sprintf("/tmp/nbdkit-%s-%s.sock", safeVmName, c.UUID)
+	cmd := exec.Command(
+		"nbdkit",
+		"--readonly",
+		"--exit-with-parent",
+		"--foreground",
+		"--unix", socket,
+		"curl",
+		fmt.Sprintf("url=%s", diskURL),
+		fmt.Sprintf("user=%s", c.User),
+		fmt.Sprintf("password=%s", c.Password),
+		"sslverify=false",
+		"timeout=2000",
+	)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	logger.Log.Infof("Starting nbdkit-curl for disk: %s", diskURL)
+	if err := cmd.Start(); err != nil {
+		logger.Log.Infof("Failed to start nbdkit: %v", err)
+		return nil, err
+	}
+	logger.Log.Infof("nbdkit started...")
+	logger.Log.Infof("Command: %v", cmd)
+
+	time.Sleep(100 * time.Millisecond)
+	err = WaitForNbdkit(socket, 30*time.Second)
+	if err != nil {
+		logger.Log.Infof("Failed to wait for nbdkit: %v", err)
+		if cmd.Process != nil {
+			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+				logger.Log.Infof("Failed to kill process: %v", err)
+			}
+			if err := removeSocket(socket); err != nil {
+				logger.Log.Infof("Failed to remove socket: %v", err)
+			}
+		}
+		return nil, err
+	}
+
+	return &NbdkitServer{
+		cmd:    cmd,
+		socket: socket,
+	}, nil
 }
 
 func (c *NbdkitConfig) RunNbdKitURI(diskName string) (*NbdkitServer, error) {

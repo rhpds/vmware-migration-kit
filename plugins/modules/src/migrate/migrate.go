@@ -420,6 +420,11 @@ func main() {
 	vmname := ansible.RequireField(moduleArgs.VmName, "VM name is required")
 	libdir := ansible.DefaultIfEmpty(moduleArgs.Libdir, "/usr/lib/vmware-vix-disklib")
 	vddkpath := ansible.DefaultIfEmpty(moduleArgs.VddkPath, "/ha-datacenter/vm/")
+	// Extract datacenter name from vddkpath (e.g. "/RS00/vm/" -> "RS00")
+	datacenter := ""
+	if parts := strings.SplitN(strings.Trim(vddkpath, "/"), "/", 2); len(parts) > 0 {
+		datacenter = parts[0]
+	}
 	osmdatadir := ansible.DefaultIfEmpty(moduleArgs.OSMDataDir, "/tmp/")
 	convHostName := ansible.DefaultIfEmpty(moduleArgs.ConvHostName, "")
 	compression := ansible.DefaultIfEmpty(moduleArgs.Compression, "fastlz")
@@ -525,6 +530,7 @@ func main() {
 				Compression: compression,
 				UUID:        r,
 				UseSocks:    socks,
+				Datacenter:  datacenter,
 				VddkConfig: &vmware.VddkConfig{
 					VirtualMachine:    vm,
 					SnapshotReference: types.ManagedObjectReference{},
