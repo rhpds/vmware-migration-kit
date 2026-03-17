@@ -122,6 +122,13 @@ func (c *NbdkitConfig) diskBackingToFolderURL(diskName string) (string, error) {
 		diskPath = strings.TrimSuffix(diskPath, ".vmdk") + "-flat.vmdk"
 	}
 
+	// If the disk path has no directory component (e.g. "haproxy.vmdk" rather
+	// than "haproxy/haproxy.vmdk"), prepend the VM name as the directory.
+	// vCenter stores disks in per-VM directories under the datastore.
+	if !strings.Contains(diskPath, "/") {
+		diskPath = c.VmName + "/" + diskPath
+	}
+
 	dcPath := c.Datacenter
 	if dcPath == "" {
 		dcPath = "ha-datacenter"
