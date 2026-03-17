@@ -363,13 +363,11 @@ func WaitForNbdkit(socket string, timeout time.Duration) error {
 }
 
 // buildNbdCopyCommand constructs the nbdcopy command string.
-func buildNbdCopyCommand(socket, device string, assumeZero bool) string {
-	var zeroArg string
-	if assumeZero {
-		zeroArg = " --destination-is-zero "
-	} else {
-		zeroArg = " "
-	}
+// Always passes --destination-is-zero since the target is always a fresh
+// Cinder volume (block device), and newer nbdcopy refuses to write to
+// existing block devices without this flag.
+func buildNbdCopyCommand(socket, device string, _ bool) string {
+	zeroArg := " --destination-is-zero "
 
 	if socket == "" {
 		return fmt.Sprintf("/usr/bin/nbdcopy nbd://localhost %s%s--progress", device, zeroArg)
